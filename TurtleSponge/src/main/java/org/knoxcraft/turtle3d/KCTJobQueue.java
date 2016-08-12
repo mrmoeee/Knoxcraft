@@ -1,95 +1,86 @@
 package org.knoxcraft.turtle3d;
 
-import java.util.EmptyStackException;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Queue;
-import java.util.Stack;
-
 import org.knoxcraft.serverturtle.SpongeTurtle;
 import org.slf4j.Logger;
 import org.spongepowered.api.command.CommandSource;
-import org.spongepowered.api.entity.living.player.Player;
 import org.spongepowered.api.scheduler.SpongeExecutorService;
-import org.spongepowered.api.text.Text;
+import org.spongepowered.api.world.World;
 
+/**
+ * KCTJobQueue is responsible for queue-ing Turtle scripts that the students have submitted using the /invoke
+ * command in Minecraft. KCTJobQueue works directly with WorkMap to queue work in a thread safe way.
+ * This class should be used at the top level plugin to add turtle scripts to be placed in the Minecraft world.
+ * @author kakoijohn
+ *
+ */
 public class KCTJobQueue {
     
     private Logger log;
     
-    private Queue<SpongeTurtle> queue;
-    private HashMap<String, Stack<Stack<KCTWorldBlockInfo>>> undoBuffer; // PlayerName->buffer
+    private WorkMap workMap; // PlayerName->buffer
     
     private SpongeExecutorService minecraftSyncExecutor;
-    private SpongeExecutorService minecraftAsyncExecutor;
     
-    private SpongeTurtle undoWorkerTurtle;
+    private WorkThread workThread;
     
-    public KCTJobQueue(SpongeExecutorService minecraftSyncExecutor, SpongeExecutorService minecraftAsyncExecutor, Logger log) {
+    /**
+     * This constructor spawns and starts the work thread.
+     * @param minecraftSyncExecutor The Sync Executor is needed to place blocks in Minecraft from a separate thread.
+     * Sync Executor syncs with the main Minecraft thread and world.setblock() methods can be called.
+     * @param log
+     * @param world
+     * @param sleepTime
+     */
+    public KCTJobQueue(SpongeExecutorService minecraftSyncExecutor, Logger log, World world, long sleepTime) {
         this.log = log;
-        
-        queue = new LinkedList<SpongeTurtle>();
-        undoBuffer = new HashMap<String, Stack<Stack<KCTWorldBlockInfo>>>();
-        undoWorkerTurtle = new SpongeTurtle(log);
-        this.minecraftSyncExecutor = minecraftSyncExecutor;
-        this.minecraftAsyncExecutor = minecraftAsyncExecutor;
-    }
-    
-    public void add(SpongeTurtle job) {
-        queue.add(job);
-        spongeExecuteQueuedJobs();
-    }
-    
-    private void spongeExecuteQueuedJobs() {
-        while (!queue.isEmpty()) {
-            SpongeTurtle job = queue.poll();
-            
-            minecraftAsyncExecutor.submit(new Runnable() {
-                public void run() {
-                    job.executeScript(minecraftSyncExecutor);
-                    if (!undoBuffer.containsKey(job.getSenderName()))
-                        undoBuffer.put(job.getSenderName(), new Stack<Stack<KCTWorldBlockInfo>>());
-                    undoBuffer.get(job.getSenderName()).add(job.getUndoStack());
-                }
-            });
-            
-        }
-    }
-    
-    public void undoScript(CommandSource src, int numUndo) {
-        String senderName = src.getName().toLowerCase();
-        if (src instanceof Player) {
-            undoWorkerTurtle.setWorld(((Player) src).getWorld());
-            
-            if (!undoBuffer.containsKey(senderName)) {
-                src.sendMessage(Text.of("You have not executed any scripts to undo!"));
-            } else { // buffer exists
-                // get buffer
-                Stack<Stack<KCTWorldBlockInfo>> undoUserScripts = undoBuffer.get(senderName);
 
-                if (undoUserScripts == null) { // buffer empty
-                    src.sendMessage(Text.of("There were no scripts invoked by the player!"));
-                } else {
-                    for (int i = 0; i < numUndo; i++) {
-                        try {
-                            Stack<KCTWorldBlockInfo> undoJobStack = undoUserScripts.pop();
-                            minecraftAsyncExecutor.submit(new Runnable() {
-                                public void run() {
-                                    undoWorkerTurtle.executeUndoStack(undoJobStack, minecraftSyncExecutor);
-                                }
-                            });
-                        } catch (EmptyStackException e) {
-                            src.sendMessage(Text.of("There are no more scripts to undo!"));
-                            break;
-                        }   
-                    }
-                }
-            }
-        }
+        this.minecraftSyncExecutor = minecraftSyncExecutor;
+        
+        workMap = new WorkMap(log);
+        workThread = new WorkThread(workMap, world, sleepTime, minecraftSyncExecutor, log);
+        workThread.start();
     }
     
-    public void shutdownExecutor() {
+    /**
+     * Adds work to the workMap
+     * @param job A turtle job that has been executed is needed in order for this method to work.
+     * Call turtle.executeScript() before passing the SpongeTurtle.
+     */
+    public void add(SpongeTurtle job) {
+        workMap.addWork(job.getSenderName(), job.getWorkload());
+    }
+    
+    /**
+     * Adds undo work to the workMap
+     * @param src CommandSource is the class attached to whatever invoked the command in Minecraft.
+     * @param numUndo The number of scripts to undo.
+     */
+    public void undoScript(CommandSource src, int numUndo) {
+        workMap.addUndo(src, numUndo);
+    }
+    
+    /**
+     * Tells the workMap to cancel the currently running script.
+     * @param src CommandSource is the class attached to whatever invoked the command in Minecraft.
+     */
+    public void cancelScript(CommandSource src) {
+        workMap.cancel(src);
+    }
+    
+    /**
+     * Clears all queues in WorkMap. 
+     */
+    public void killAll() {
+        workMap.killAll();
+    }
+    
+    /**
+     * When the server has finished running and is in it's cleanup and shutdown phase, 
+     * you must also stop the thread that this class has spawned at its construction. 
+     */
+    public void shutdown() {
+        log.debug("Shutting down Sponge Executors and Threads.");
+        workThread.shutdown();
         minecraftSyncExecutor.shutdown();
-        minecraftAsyncExecutor.shutdown();
     }
 }
