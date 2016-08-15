@@ -11,6 +11,7 @@ import java.util.Queue;
  */
 public class WorkChunk {
     private String userName;
+    private String jobName;
     private int jobNum;
     private int workChunkNum;
     private int workChunkSize;
@@ -27,8 +28,9 @@ public class WorkChunk {
      * @param workChunkNum
      * @param workChunkSize
      */
-    public WorkChunk(Queue<KCTWorldBlockInfo> blockChunk, String userName, int jobNum, int workChunkNum, int workChunkSize) {
+    public WorkChunk(Queue<KCTWorldBlockInfo> blockChunk, String jobName, String userName, int jobNum, int workChunkNum, int workChunkSize) {
         this.blockChunk = blockChunk;
+        this.jobName = jobName;
         this.userName = userName;
         this.jobNum = jobNum;
         this.workChunkNum = workChunkNum;
@@ -41,6 +43,7 @@ public class WorkChunk {
      */
     public WorkChunk(WorkChunk workChunk) {
         this.blockChunk = new LinkedList<KCTWorldBlockInfo>(workChunk.blockChunk);
+        this.jobName = workChunk.jobName;
         this.userName = workChunk.userName;
         this.jobNum = workChunk.jobNum;
         this.workChunkNum = workChunk.workChunkNum;
@@ -55,6 +58,10 @@ public class WorkChunk {
         return this.userName;
     }
     
+    public String getJobName() {
+        return this.jobName;
+    }
+    
     public int getJobNum() {
         return this.jobNum;
     }
@@ -65,6 +72,10 @@ public class WorkChunk {
     
     public int getWorkChunkMaxSize() {
         return this.workChunkSize;
+    }
+    
+    public int getQueueSize() {
+        return blockChunk.size();
     }
     
     /**

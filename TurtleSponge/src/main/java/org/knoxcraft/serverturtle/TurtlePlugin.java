@@ -1,5 +1,9 @@
 package org.knoxcraft.serverturtle;
 
+import static org.knoxcraft.database.DatabaseConfiguration.convert;
+
+import java.io.File;
+import java.io.IOException;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -9,16 +13,17 @@ import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-import net.canarymod.database.DataAccess;
-import net.canarymod.database.Database;
-import net.canarymod.database.exceptions.DatabaseReadException;
-import net.canarymod.database.exceptions.DatabaseWriteException;
+import ninja.leaping.configurate.commented.CommentedConfigurationNode;
+import ninja.leaping.configurate.hocon.HoconConfigurationLoader;
+import ninja.leaping.configurate.loader.ConfigurationLoader;
 
-import org.knoxcraft.database.KCTScriptAccess;
+import org.knoxcraft.database.DataAccess;
+import org.knoxcraft.database.Database;
+import org.knoxcraft.database.exceptions.DatabaseReadException;
+import org.knoxcraft.database.exceptions.DatabaseWriteException;
+import org.knoxcraft.database.tables.KCTScriptAccess;
 import org.knoxcraft.hooks.KCTUploadHook;
 import org.knoxcraft.jetty.server.JettyServer;
-import org.knoxcraft.turtle3d.KCTBlockTypes;
-import org.knoxcraft.turtle3d.KCTCommand;
 import org.knoxcraft.turtle3d.KCTJobQueue;
 import org.knoxcraft.turtle3d.KCTScript;
 import org.knoxcraft.turtle3d.TurtleCompiler;
@@ -33,12 +38,15 @@ import org.spongepowered.api.command.args.CommandContext;
 import org.spongepowered.api.command.args.GenericArguments;
 import org.spongepowered.api.command.spec.CommandExecutor;
 import org.spongepowered.api.command.spec.CommandSpec;
+import org.spongepowered.api.config.ConfigDir;
 import org.spongepowered.api.entity.living.player.Player;
 import org.spongepowered.api.event.Listener;
+import org.spongepowered.api.event.block.ChangeBlockEvent;
+import org.spongepowered.api.event.command.SendCommandEvent;
 import org.spongepowered.api.event.game.state.GameConstructionEvent;
 import org.spongepowered.api.event.game.state.GameStartedServerEvent;
 import org.spongepowered.api.event.game.state.GameStoppedServerEvent;
-import org.spongepowered.api.event.network.ClientConnectionEvent.Login;
+import org.spongepowered.api.event.network.ClientConnectionEvent.Join;
 import org.spongepowered.api.event.world.ChangeWorldWeatherEvent;
 import org.spongepowered.api.event.world.LoadWorldEvent;
 import org.spongepowered.api.plugin.Plugin;
@@ -56,15 +64,20 @@ import com.flowpowered.math.vector.Vector3i;
 import com.google.inject.Inject;
 
 /**
- * Sponge plugin to run when the Minecraft server starts up.
- * @author kakoijohn
+ * Sponge Knoxcraft plugin to run when the Minecraft server starts up.
+ * @author mrmoeee jspacco kakoijohn 
  *
  */
 @Plugin(id = TurtlePlugin.ID, name = "TurtlePlugin", version = "0.2", description = "Knoxcraft Turtles Plugin for Minecraft", authors = {
-		"kakoijohn", "mrmoeee", "emhastings", "ppypp", "jspacco" })
+		"kakoijohn", "mrmoeee", "stringnotfound", "emhastings", "ppypp", "jspacco" })
 public class TurtlePlugin {
 
-	public static final String ID = "kct";
+    private static final String SLEEP_TIME = "knoxcraft.sleepTime";
+    private static final String WORK_CHUNK_SIZE = "knoxcraft.workChunkSize";
+    private static final String MIN_BUILD_HEIGHT = "knoxcraft.minBuildHeight";
+    private static final String MAX_BUILD_HEIGHT = "knoxcraft.maxBuildHeight";
+    private static final String MAX_JOB_SIZE = "knoxcraft.maxJobSize";
+    public static final String ID = "knoxcraft";
 	private static final String PLAYER_NAME = "playerName";
 	private static final String SCRIPT_NAME = "scriptName";
 	private static final String NUM_UNDO = "numUndo";
@@ -77,13 +90,25 @@ public class TurtlePlugin {
 	private World world;
 
 	private SpongeExecutorService minecraftSyncExecutor;
-//	private SpongeExecutorService minecraftAsyncExecutor;
 
 	@Inject
 	private PluginContainer container;
 	
-	private long sleepTime = 200;
-	private int workChunkSize = 500;
+    // The configuration folder for this plugin
+    @Inject
+    @ConfigDir(sharedRoot = true)
+    private File configDir;
+
+    // The in-memory version of the knoxcraft configuration file
+    private CommentedConfigurationNode knoxcraftConfig;
+
+    // configured in config/knoxcraft.conf
+	private long sleepTime;
+	private int workChunkSize;
+	private int minBuildHeight;
+	private int maxBuildHeight;
+	private int maxJobSize;
+	
 	private int jobNum = 0;
 
 	/**
@@ -119,12 +144,12 @@ public class TurtlePlugin {
 	    //we must change the file to the correct format.
 	    int result = kcProperties.loadServerProperties();
 	    if (result == 1)
-	        log.info("Correct server.properties file loaded.");
+	        log.debug("Correct server.properties file loaded.");
 	    else if (result == 0) {
-	        log.info("Incorrect server.properties file. Replacing with new file.");
+	        log.debug("Incorrect server.properties file. Replacing with new file.");
 	        kcProperties.createPropertiesFile();
 	    } else if (result == -1) {
-	        log.info("No server.properties file found. Creating new one.");
+	        log.debug("No server.properties file found. Creating new one.");
 	        kcProperties.createPropertiesFile();
 	    }
 	}
@@ -150,12 +175,103 @@ public class TurtlePlugin {
 
 		log.info("Enabling " + container.getName() + " Version " + container.getVersion());
 		log.info("Authored by " + container.getAuthors());
+		
+		// read configuration parameters
+		try {
+		    loadOrCreateConfigFile();
+		} catch (IOException e) {
+		    log.error("Unable to create or load knoxcraft config file!");
+		    // TODO: set up a default
+		}
 
 		// Look up previously submitted scripts from the DB
 		lookupFromDB();
 
 		// set up commands
 		setupCommands();
+	}
+	
+	
+	
+	/**
+	 * Load the configuration properties from config/knoxcraft.conf in HOCON format.
+	 * 
+	 * If no config file exists, create one with default values.
+	 * 
+	 * XXX NOTE: this method also configured the database, which is a bit sloppy.
+	 * 
+	 */
+	private void loadOrCreateConfigFile() throws IOException
+	{
+	    // Check for config file config/knoxcraft.conf
+	    File knoxcraftConfigFile = new File(this.configDir, "knoxcraft.conf");
+        ConfigurationLoader<CommentedConfigurationNode> knoxcraftConfigLoader = 
+                HoconConfigurationLoader.builder().setFile(knoxcraftConfigFile).build();
+        
+        // Create the folder if it does not exist
+        if (!this.configDir.isDirectory()) {
+            this.configDir.mkdirs();
+        }
+
+        // Create the config file if it does not exist
+        if (!knoxcraftConfigFile.isFile()) {
+            knoxcraftConfigFile.createNewFile();
+        }
+        
+        // now load the knoxcraft config file
+        this.knoxcraftConfig = knoxcraftConfigLoader.load();
+
+        // ensure we have correct database defaults
+        // will add any config values that are missing
+        Database.configure(knoxcraftConfig);
+        
+        // set other default configuration settings using this syntax:
+        // if a node with the given value already exists, it will NOT overwrite it
+        addConfigSetting(WORK_CHUNK_SIZE, 500, "Number of blocks to build at a time. Larger values will lag and eventually crash the server. 500 seems to work.");
+        addConfigSetting(SLEEP_TIME, 200, "Number of millis to wait between building chunks of blocks. Shorter values are more likely to lag and eventually crash the server. 200 seems to work.");
+        addConfigSetting(MIN_BUILD_HEIGHT, 3, "Minimum build height for a flat world. This prevents structures being built underneath the ground and breaking through the bedrock. 3 seems to work.");
+        addConfigSetting(MAX_BUILD_HEIGHT, 256, "Maximum build height allowed. 256 is the default for Minecraft build height.");
+        addConfigSetting(MAX_JOB_SIZE, -1, "Maximum number of blocks allowed to be built by invoking a single script. If you do not want a limit, set this value to -1.");
+        
+        // now save the configuration file, in case we changed anything
+        knoxcraftConfigLoader.save(this.knoxcraftConfig);
+        
+        // finally, load our values into instance variables
+        this.workChunkSize = readIntConfigSetting(WORK_CHUNK_SIZE);
+        this.sleepTime = readIntConfigSetting(SLEEP_TIME);
+        this.minBuildHeight = readIntConfigSetting(MIN_BUILD_HEIGHT);
+        this.maxBuildHeight = readIntConfigSetting(MAX_BUILD_HEIGHT);
+        this.maxJobSize = readIntConfigSetting(MAX_JOB_SIZE);
+        
+        log.info(WORK_CHUNK_SIZE+" = "+workChunkSize);
+        log.info(SLEEP_TIME+" = "+sleepTime);
+        log.info(MIN_BUILD_HEIGHT+" = "+minBuildHeight);
+        log.info(MAX_BUILD_HEIGHT+" = "+maxBuildHeight);
+        log.info(MAX_JOB_SIZE+" = "+maxJobSize);
+	}
+	
+	private int readIntConfigSetting(String path) {
+        return knoxcraftConfig.getNode(convert(path)).getInt();
+    }
+	private String readStringConfigSetting(String path) {
+        return knoxcraftConfig.getNode(convert(path)).getString();
+    }
+
+    private void addConfigSetting(String path, Object value) {
+	    addConfigSetting(path, value, null);
+	}
+	
+	private void addConfigSetting(String path, Object value, String comment) {
+	    CommentedConfigurationNode node=knoxcraftConfig.getNode(convert(path));
+	    if (node.isVirtual()) {
+	        log.trace("it's virtual! "+path+" "+value);
+	        node=node.setValue(value);
+	        if (comment!=null){
+	            node.setComment(comment);
+	        }
+	    } else {
+	        log.trace("NOT virtual! "+path+" "+value);
+	    }
 	}
 	
 	/**
@@ -176,20 +292,20 @@ public class TurtlePlugin {
 
 			// BRIGHT SUNNY DAY (12000 = sun set)
 			world.getProperties().setWorldTime(0);
-			log.info(String.format("Currenttime: " + world.getProperties().getWorldTime()));
+			log.debug(String.format("Currenttime: " + world.getProperties().getWorldTime()));
 
 			// TIME CHANGE SCHEDULER 
 			minecraftSyncExecutor = Sponge.getScheduler().createSyncExecutor(this);
 			minecraftSyncExecutor.scheduleWithFixedDelay(new Runnable() {
 				public void run() {
 					world.getProperties().setWorldTime(0);
-					log.info(String.format("Timechange: " + world.getProperties().getWorldTime()));
+					log.debug(String.format("Timechange: " + world.getProperties().getWorldTime()));
 				}
 				// change minecraftWorld time every 10 minutes
 			}, 0, 10, TimeUnit.MINUTES);
 			
 			//SETUP JOBQUEUE FOR TURTLE SCRIPT EXECUTOR
-			jobQueue = new KCTJobQueue(minecraftSyncExecutor, log, world, sleepTime);
+			jobQueue = new KCTJobQueue(minecraftSyncExecutor, log, world, sleepTime, minBuildHeight, maxBuildHeight);
 		}
 	}
 
@@ -280,7 +396,7 @@ public class TurtlePlugin {
 						String scriptName = optScriptName.get();
 						String playerName = src.getName().toLowerCase();
 
-						log.info("playername ==" + playerName);
+						log.debug("playername ==" + playerName);
 						Optional<String> optPlayerName = args.getOne(PLAYER_NAME);
 						if (optPlayerName.isPresent()) {
 							playerName = optPlayerName.get();
@@ -298,9 +414,7 @@ public class TurtlePlugin {
 							log.warn(String.format("player %s cannot find script %s", playerName, scriptName));
 							src.sendMessage(
 									Text.of(String.format("%s, you have no script named %s", playerName, scriptName)));
-							// FIXME: remove this fake square
-							script = makeFakeSquare();
-							// return CommandResult.success();
+							return CommandResult.success();
 						}
 
 						SpongeTurtle turtle = new SpongeTurtle(log);
@@ -316,10 +430,10 @@ public class TurtlePlugin {
 							Vector3d headRotation = player.getHeadRotation();
 							Vector3d rotation = player.getRotation();
 
-							log.info("headRotation=" + headRotation);
-							log.info("rotation=" + rotation);
+							log.debug("headRotation=" + headRotation);
+							log.debug("rotation=" + rotation);
 							TurtleDirection d = TurtleDirection.getTurtleDirection(rotation);
-							log.info("pos= " + pos);
+							log.debug("pos= " + pos);
 
 							turtle.setSenderName(playerName);
 							turtle.setLoc(pos);
@@ -330,7 +444,15 @@ public class TurtlePlugin {
 							turtle.setScript(script);
 							
 							turtle.executeScript();
-							jobQueue.add(turtle);
+							
+							if (maxJobSize == -1 || turtle.getJobSize() < maxJobSize) {
+							    jobQueue.add(turtle);
+	                            src.sendMessage(Text.of("Building " + script.getScriptName() + "!"));
+	                            log.debug("Job Size: " + turtle.getJobSize());
+							} else {
+							    src.sendMessage(Text.of("Your script is too big!"));
+							    src.sendMessage(Text.of("Max block size: " + maxJobSize + ", User script size: " + turtle.getJobSize()));
+							}
 							
 						}
 						return CommandResult.success();
@@ -338,7 +460,8 @@ public class TurtlePlugin {
 				}).build();
 		Sponge.getCommandManager().register(this, invokeScript, "invoke", "in");
 
-		CommandSpec undo = CommandSpec.builder().description(Text.of("Undo the previous script")).permission("")
+		CommandSpec undo = CommandSpec.builder().description(Text.of("Undo the previous script"))
+		        .permission("")
 				.arguments(GenericArguments.optional(GenericArguments.integer(Text.of(NUM_UNDO))))
 				.executor(new CommandExecutor() {
 					@Override
@@ -358,8 +481,9 @@ public class TurtlePlugin {
 				}).build();
 		Sponge.getCommandManager().register(this, undo, "undo", "un");
 		
-	    CommandSpec cancel = CommandSpec.builder().description(Text.of("Cancel currently queued work")).permission("")
-	             .executor(new CommandExecutor() {
+	    CommandSpec cancel = CommandSpec.builder().description(Text.of("Cancel currently queued work"))
+	            .permission("")
+	            .executor(new CommandExecutor() {
 	                 @Override
 	                 public CommandResult execute(CommandSource src, CommandContext args) throws CommandException {
 	                     log.debug("Cancel invoked!");
@@ -372,23 +496,18 @@ public class TurtlePlugin {
 	             }).build();
 	    Sponge.getCommandManager().register(this, cancel, "cancel", "cn");
 	    
-        CommandSpec killAll = CommandSpec.builder().description(Text.of("Kill all queued work")).permission("")
-                .arguments(GenericArguments.onlyOne(GenericArguments.bool(Text.of(ARE_YOU_SURE))))
+	    // requires op permission
+        CommandSpec killAll = CommandSpec.builder().description(Text.of("Kill all queued work"))
+                .permission("minecraft.command.op")
+                .arguments(GenericArguments.onlyOne(GenericArguments.string(Text.of(ARE_YOU_SURE))))
                 .executor(new CommandExecutor() {
                     @Override
                     public CommandResult execute(CommandSource src, CommandContext args) throws CommandException {
                         Optional<String> optAreYouSure = args.getOne(ARE_YOU_SURE);
-                        if (!optAreYouSure.isPresent()) {
-                            src.sendMessage(Text.of("You must say \"/killall yes\" in order to confirm clearing the entire queue!"));
-                            src.sendMessage(Text.of("Once you have cleared the queue, you cannot take this back!"));
-                            return CommandResult.success();
-                        }
-                        
-                        String areYouSure = optAreYouSure.get();
-                        
-                        if (areYouSure.equalsIgnoreCase("yes")) {
-                            log.debug("Kill All invoked!");
 
+                        if (optAreYouSure.isPresent() && optAreYouSure.get().equals("yes")) {
+                            log.warn("Killing all invoked scripts, and emptying the undo stack.");
+                            src.sendMessage(Text.of("Clearing the entire build queue, and the undo queue!"));
                             jobQueue.killAll();
                         } else {
                             src.sendMessage(Text.of("You must say \"/killall yes\" in order to confirm clearing the entire queue!"));
@@ -401,46 +520,7 @@ public class TurtlePlugin {
                 }).build();
         Sponge.getCommandManager().register(this, killAll, "killAll", "killall");
 	}
-
-	public static KCTScript makeFakeSquare() {
-		KCTScript script = new KCTScript("testscript");
-		// TODO flesh this out to test a number of other commands
-		
-		for (int i = 0; i < 5; i++) {
-		    script.addCommand(KCTCommand.setBlock(KCTBlockTypes.BLUE_WOOL));
-		    
-			for (int j = 0; j < 25; j++) {
-				script.addCommand(KCTCommand.forward(50));
-				script.addCommand(KCTCommand.turnLeft(90));
-				script.addCommand(KCTCommand.forward(1));
-				script.addCommand(KCTCommand.turnLeft(90));
-				script.addCommand(KCTCommand.forward(50));
-				script.addCommand(KCTCommand.turnRight(90));
-				script.addCommand(KCTCommand.forward(1));
-				script.addCommand(KCTCommand.turnRight(90));
-			}
-			
-			script.addCommand(KCTCommand.setBlock(KCTBlockTypes.RED_WOOL));
-			
-			script.addCommand(KCTCommand.up(1));
-
-			for (int j = 0; j < 25; j++) {
-				script.addCommand(KCTCommand.forward(50));
-				script.addCommand(KCTCommand.turnRight(90));
-				script.addCommand(KCTCommand.forward(1));
-				script.addCommand(KCTCommand.turnRight(90));
-				script.addCommand(KCTCommand.forward(50));
-				script.addCommand(KCTCommand.turnLeft(90));
-				script.addCommand(KCTCommand.forward(1));
-				script.addCommand(KCTCommand.turnLeft(90));
-			}
-
-			script.addCommand(KCTCommand.up(1));
-		}
-
-		return script;
-	}
-
+	
 	/**
 	 * Load the latest version of each script from the DB for each player on
 	 * this world
@@ -496,20 +576,26 @@ public class TurtlePlugin {
 
 	// Listeners
 
+	@Listener
+	public void onSendCommand(SendCommandEvent event) {
+	    log.info(String.format("Command event listener: %s %s", event.getCommand(), event.getArguments()));
+	}
+	
 	/**
 	 * @param loginEvent
 	 */
 	@Listener
-	public void onLogin(Login loginEvent) {
+	public void onJoin(Join joinEvent) {
 		// TODO: verify that this hook related to logging in
 		// TODO prevent breaking blocks, by figuring out equivalent of
 		// setCanBuild(false);
-		log.debug(String.format("player " + loginEvent.getTargetUser().getName()));
+	    log.info("Logging in; checking to see if debug level log works");
+		log.debug(String.format("player " + joinEvent.getTargetEntity().getName()));
 	}
 
 	/**
-	 * TODO: Fix this hook. This doesn't seem to get called. I would like to
-	 * shut rain off every time it starts raining.
+	 * Weather Change Event Listener
+	 * Changes weather to clear any time the weather change event is called.
 	 * 
 	 * @param hook
 	 */
@@ -519,8 +605,26 @@ public class TurtlePlugin {
 		Weather curWeather;
 		worldWeatherListener.setWeather(Weathers.CLEAR);
 		curWeather = worldWeatherListener.getWeather();
-		log.info(String.format("Weather listener called"));
-		log.info(String.format("current weather = %s ", curWeather.getName()));
+		log.debug(String.format("Weather listener called"));
+		log.debug(String.format("current weather = %s ", curWeather.getName()));
+	}
+	
+	/**
+	 * Block Change Event Listener
+	 * Stop any non-op player from breaking blocks in the world.
+	 * @param event
+	 */
+	@Listener
+	public void blockChangeEvent(ChangeBlockEvent event) {
+	    if (event.getCause().root() instanceof Player) {
+	        Player player = (Player) event.getCause().root();
+//	        log.info("A player attempted to change a block.");
+	        
+	        if (!player.hasPermission("minecraft.command.op")) {
+	            //if the player does not have the proper op permission, cancel the block break event. 
+	            event.setCancelled(true);
+	        }
+	    }
 	}
 
 	/**
@@ -530,7 +634,7 @@ public class TurtlePlugin {
 	 */
 	@Listener
 	public void uploadJSON(KCTUploadHook event) {
-		log.debug("Hook called!");
+		log.debug("KCTUploadHook called!");
 		// add scripts to manager and db
 		Collection<KCTScript> list = event.getScripts();
 		for (KCTScript script : list) {

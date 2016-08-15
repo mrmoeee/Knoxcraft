@@ -48,7 +48,7 @@ public class WorkMap {
      * blocks to be placed and the world positions.
      */
     public synchronized void addWork(String playerName, Workload workload) {
-        log.info("Work is being added...");
+        log.debug("Work is being added...");
         if (!userWorkMap.containsKey(playerName)) {
             userWorkMap.put(playerName, nextIndex);
             
@@ -87,6 +87,8 @@ public class WorkMap {
                     src.sendMessage(Text.of("You attempted to invoke " + numUndo + " scripts. You only have " + i + "!"));
                     break;
                 }
+                
+                src.sendMessage(Text.of("Undoing: " + undoWork.peekFirst().getJobName() + ", With Job#: " + undoWork.peekFirst().getJobNum()));
 //                log.info("Undo Work Size: " + undoWork.getWorkChunks().peek().getBlockChunk().size());
                 int index = userWorkMap.get(playerName);
                 workList.get(index).addAll(undoWork);
@@ -122,11 +124,11 @@ public class WorkMap {
                     int workChunkNum = cancelChunk.getWorkChunkNum();
                     
                     for (Workload archiveWork : workArchive.get(playerName)) {
-                        if (archiveWork.peekWork().getJobNum() == curJobNum && workChunkNum == 0) {
+                        if (archiveWork.peekFirst().getJobNum() == curJobNum && workChunkNum == 0) {
                             //if the build has not started, we just remove it completely
                             workArchive.get(playerName).pop();
                             break;
-                        } else if (archiveWork.peekWork().getJobNum() == curJobNum) {
+                        } else if (archiveWork.peekFirst().getJobNum() == curJobNum) {
                             //if the build has started, we must remove the remaining unbuilt archive work.
 //                            log.info("Chunk Num: " + workChunkNum + " Work Size: " + archiveWork.remainingWorkSize());
                             int remainingWork = archiveWork.remainingWorkSize();
@@ -141,6 +143,8 @@ public class WorkMap {
         } else {
             src.sendMessage(Text.of("You don't have any scripts currently running!"));
         }
+        
+        src.sendMessage(Text.of("Cancelled all queued jobs!"));
         
         this.notifyAll();
     }
@@ -158,7 +162,7 @@ public class WorkMap {
             }
         }
         
-        log.info("Finished clearing all queues.");
+        log.debug("Finished clearing all queues.");
     }
     
     /**
